@@ -6,8 +6,6 @@
 # - Downloads and sets up vmangos database and core
 # - Configures MySQL for the 'mangos' user
 
-# - Work in progress, will update to ultimately go from zero to full running vmangos vanilla server on a fresh vps with only input up front. 
-
 # Colors for readability
 GREEN='\e[32m'
 RED='\e[31m'
@@ -20,7 +18,7 @@ echo -e "${GREEN}Please enter the MariaDB password for the vmangos 'mangos' user
 read -s MYSQL_PASS
 export MYSQL_PASS
 
-echo -e "${GREEN}Please enter the hostname for the server (127.0.0.1 if hosting locally, otherwise your external IP):${NC}"
+echo -e "${GREEN}Please enter the hostname for the server (Leave blank for 127.0.0.1) if hosting locally, otherwise your external IP):${NC}"
 read ExtIP
 export ExtIP="${ExtIP:-127.0.0.1}"
 
@@ -61,7 +59,8 @@ done
 
 # Download game client files in background if DlAns is "yes"
 if [ "$DlAns" == "yes" ]; then
-    echo -e "${GREEN}Starting download of the client for extractors. This will run in the background.${NC}"
+    echo -e "${GREEN}Starting download of the client for extractors. This will run in the background and pause the installer if not finished after compiling.${NC}"
+    cd $VmDir || { echo -e "${RED}Error: Cannot cd to $VmDir.${NC}"; exit 1; }
     wget -b "http://cdn.twinstar-wow.com/WoW_Vanilla.zip" > "$VmDir/wget-download.log" 2>&1 &
     echo "Download progress is being logged to $VmDir/wget-download.log"
 fi
@@ -92,6 +91,7 @@ sudo apt install -y \
     libtbb-dev \
     libace-dev \
     unzip \
+    python3 \
     || { echo -e "${RED}Error: Failed to install packages.${NC}"; exit 1; }
 echo -e "${GREEN}Packages installed successfully!${NC}"
 
@@ -180,6 +180,54 @@ echo -e "${GREEN}Building vmangos core...${NC}"
 make -j"$NUM_CORES" || { echo -e "${RED}Error: Compilation failed.${NC}"; exit 1; }
 make install || { echo -e "${RED}Error: Installation failed.${NC}"; exit 1; }
 
+# Copying server configuration files from .conf.dist to .conf
+cp $VmDir/vmangos/run/etc/mangosd.conf.dist $VmDir/vmangos/run/etc/mangosd.conf
+cp $VmDir/vmangos/run/etc/realmd.conf.dist $VmDir/vmangos/run/etc/realmd.conf
+
+# Changing hostname in config files (if applicable)
+if [ -n "$ExtIP" ] && [ "$ExtIP" != "127.0.0.1" ]; then
+    sed -i "s/\"127.0.0.1\"/\"$ExtIP\"/g" "$VmDir/vmangos/run/etc/mangosd.conf"
+    sed -i "s/\"127.0.0.1\"/\"$ExtIP\"/g" "$VmDir/vmangos/run/etc/realmd.conf"
+fi
+
+# Replace mangos mysql password in configuration files
+sed -i "s/\"mangos\"/\"mangos\" \"$MYSQL_PASS\"/g" $VmDir/vmangos/run/etc/mangosd.conf
+sed -i "s/\"mangos\"/\"mangos\" \"$MYSQL_PASS\"/g" $VmDir/vmangos/run/etc/realmd.conf
+
+# If DlAns = yes, wait for the download to finish before continuing
+if [ "$DlAns" == "yes" ]; then
+    echo -e "${GREEN}Waiting for the client download to finish...${NC}"
+    wait # Waits for all background processes to finish
+    echo -e "${GREEN}Download complete!${NC}"
+    cd ~ || { echo -e "${RED}Error: Cannot cd to home directory.${NC}"; exit 1; }
+    unzip -o WoW_Vanilla.zip -d "$VmDir" || { echo -e "${RED}Error: Failed to unzip client.${NC}"; exit 1; }
+    mv 'WoW_Vanilla' WoW || { echo -e "${RED}Error: Failed to rename client directory.${NC}"; exit 1; }
+    mv $VmDir/vmangos/run/bin/Extractors/* $VmDir/WoW || { echo -e "${RED}Error: Failed to move extractors.${NC}"; exit 1; }
+    rm -rf $VmDir/vmangos/run/bin/Extractors
+    rm -rf WoW_Vanilla.zip
+    echo -e "${GREEN}Client files and extractors moved to $VmDir/WoW.${NC}"
+    cd WoW || { echo -e "${RED}Error: Cannot cd to WoW directory.${NC}"; exit 1; }
+    chmod +x VMapAssembler VmapExtractor MapExtractor MoveMapGenerator
+    ./VMapAssembler
+    wait # Wait for VMapAssembler to finish
+    echo -e "${GREEN}VMapAssembler completed successfully!${NC}"
+    ./VmapExtractor
+    wait # Wait for VmapExtractor to finish
+    echo -e "${GREEN}VmapExtractor completed successfully!${NC}"
+    ./MoveMapGenerator
+    wait # Wait for MoveMapGenerator to finish
+    echo -e "${GREEN}MoveMapGenerator completed successfully!${NC}"
+    echo -e "${GREEN}Running mmap_extract.py... this will likely take the longest. Please be patient :) ${NC}"
+    python3 mmap_extract.py
+    wait # Wait for mmap_extract.py to finish
+    echo -e "${GREEN}mmap_extract.py completed successfully!${NC}"
+    echo -e "${GREEN}Hard part is over. Copying extracted files to the correct directory for vmangos to use!${NC}"
+    mv dbc -R $VmDir/vmangos/data
+    mv maps -R $VmDir/vmangos/data
+    mv vmaps -R $VmDir/vmangos/data
+    mv mmaps -R $VmDir/vmangos/data
+fi
+
 # Final message
 echo -e "${GREEN}Setup and compilation complete!${NC}"
-echo "Check above for any errors. Next steps: Start the server from $VmDir/run."
+echo "Check above for any errors. Next steps: Start the server from $VmDir/vmangos/run/bin."
